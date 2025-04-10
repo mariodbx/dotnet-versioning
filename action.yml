@@ -1,7 +1,7 @@
 name: Auto Version Bump for .NET Projects
 description:
   Automatically bumps the version in a .csproj file based on commit messages.
-author: MarioDeBenedictis
+author: Mario De Benedictis
 
 branding:
   icon: chevrons-up
