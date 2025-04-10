@@ -27,6 +27,7 @@ import require$$6 from 'string_decoder';
 import require$$0$9 from 'diagnostics_channel';
 import require$$2$2 from 'child_process';
 import require$$6$1 from 'timers';
+import * as fs from 'fs/promises';
 
 var commonjsGlobal = typeof globalThis !== 'undefined' ? globalThis : typeof window !== 'undefined' ? window : typeof global !== 'undefined' ? global : typeof self !== 'undefined' ? self : {};
 
@@ -27246,41 +27247,155 @@ function requireCore () {
 
 var coreExports = requireCore();
 
-/**
- * Waits for a number of milliseconds.
- *
- * @param milliseconds The number of milliseconds to wait.
- * @returns Resolves with 'done!' after the wait is over.
- */
-async function wait(milliseconds) {
-    return new Promise((resolve) => {
-        if (isNaN(milliseconds))
-            throw new Error('milliseconds is not a number');
-        setTimeout(() => resolve('done!'), milliseconds);
-    });
+function getInputOrDefault(name, defaultValue) {
+    return coreExports.getInput(name) || defaultValue;
 }
 
-/**
- * The main function for the action.
- *
- * @returns Resolves when the action is complete.
- */
+var execExports = requireExec();
+
+async function execWithOutput(command, args, options = {}) {
+    let output = '';
+    const execOptions = {
+        ...options,
+        listeners: {
+            stdout: (data) => {
+                output += data.toString();
+            },
+            stderr: options.listeners?.stderr
+        }
+    };
+    await execExports.exec(command, args, execOptions);
+    return output.trim();
+}
+
+async function getLatestCommitMessage() {
+    return await execWithOutput('git', ['log', '-1', '--pretty=%B']);
+}
+async function updateGit(newVersion, csprojPath, commitUser, commitEmail, commitMessagePrefix) {
+    await execExports.exec('git', ['config', 'user.name', commitUser]);
+    await execExports.exec('git', ['config', 'user.email', commitEmail]);
+    await execExports.exec('git', ['add', csprojPath]);
+    const commitMessageFinal = `${commitMessagePrefix}${newVersion}`;
+    await execExports.exec('git', ['commit', '-m', commitMessageFinal]);
+    await execExports.exec('git', ['push']);
+    coreExports.info(`Committed and pushed version update: "${commitMessageFinal}"`);
+}
+
+async function findCsprojFile(csprojDepth, csprojName) {
+    const findCmd = `find . -maxdepth ${csprojDepth} -name "${csprojName}" | head -n 1`;
+    const csprojPath = await execWithOutput('bash', ['-c', findCmd]);
+    return csprojPath;
+}
+async function readCsprojFile(csprojPath) {
+    return await fs.readFile(csprojPath, 'utf8');
+}
+async function updateCsprojFile(csprojPath, content) {
+    await fs.writeFile(csprojPath, content, 'utf8');
+}
+function extractVersion(csprojContent) {
+    const versionRegex = /<Version>([^<]+)<\/Version>/;
+    const match = csprojContent.match(versionRegex);
+    if (!match) {
+        throw new Error('No version found in csproj file.');
+    }
+    return match[1].trim();
+}
+function updateVersionContent(csprojContent, newVersion) {
+    const versionRegex = /<Version>([^<]+)<\/Version>/;
+    return csprojContent.replace(versionRegex, `<Version>${newVersion}</Version>`);
+}
+
+function parseVersion(version) {
+    const parts = version.split('.').map((s) => parseInt(s, 10));
+    if (parts.some((n) => isNaN(n))) {
+        throw new Error(`Invalid version format: ${version}`);
+    }
+    const [major, minor, patch, build = 0] = parts;
+    return { major, minor, patch, build };
+}
+function bumpVersion(current, bumpType) {
+    let { major, minor, patch, build } = current;
+    if (bumpType === 'major') {
+        major += 1;
+        minor = 0;
+        patch = 0;
+    }
+    else if (bumpType === 'minor') {
+        minor += 1;
+        patch = 0;
+    }
+    else if (bumpType === 'patch') {
+        patch += 1;
+    }
+    else {
+        throw new Error(`Invalid bump type: ${bumpType}`);
+    }
+    // Build number always increments.
+    build += 1;
+    return `${major}.${minor}.${patch}.${build}`;
+}
+
 async function run() {
     try {
-        const ms = coreExports.getInput('milliseconds');
-        // Debug logs are only output if the `ACTIONS_STEP_DEBUG` secret is true
-        coreExports.debug(`Waiting ${ms} milliseconds ...`);
-        // Log the current timestamp, wait, then log the new timestamp
-        coreExports.debug(new Date().toTimeString());
-        await wait(parseInt(ms, 10));
-        coreExports.debug(new Date().toTimeString());
-        // Set outputs for other workflow steps to use
-        coreExports.setOutput('time', new Date().toTimeString());
+        // Retrieve configurable inputs.
+        const csprojDepthInput = getInputOrDefault('csproj_depth', '1');
+        const csprojName = getInputOrDefault('csproj_name', '*.csproj');
+        const commitUser = getInputOrDefault('commit_user', 'github-actions');
+        const commitEmail = getInputOrDefault('commit_email', 'github-actions@users.noreply.github.com');
+        const commitMessagePrefix = getInputOrDefault('commit_message_prefix', 'chore: bump version to ');
+        coreExports.info(`Configuration: csproj_depth=${csprojDepthInput}, csproj_name=${csprojName}, commit_user=${commitUser}, commit_email=${commitEmail}`);
+        // Get the latest commit message.
+        const commitMessage = await getLatestCommitMessage();
+        coreExports.info(`Latest commit message: "${commitMessage}"`);
+        // Determine bump type by taking the first 5 alphanumeric characters in lowercase.
+        const bumpType = commitMessage
+            .substring(0, 5)
+            .replace(/[^A-Za-z]/g, '')
+            .toLowerCase();
+        coreExports.info(`Extracted bump type: "${bumpType}"`);
+        if (!['patch', 'minor', 'major'].includes(bumpType)) {
+            coreExports.info('Commit message does not indicate a version bump. Skipping release.');
+            coreExports.setOutput('skip_release', 'true');
+            return;
+        }
+        coreExports.setOutput('skip_release', 'false');
+        coreExports.setOutput('bump_type', bumpType);
+        // Validate csproj depth.
+        const csprojDepth = parseInt(csprojDepthInput, 10);
+        if (isNaN(csprojDepth) || csprojDepth < 1) {
+            throw new Error('csproj_depth must be a positive integer');
+        }
+        // Locate the csproj file.
+        const csprojPath = await findCsprojFile(csprojDepth, csprojName);
+        if (!csprojPath) {
+            throw new Error(`No csproj file found with name "${csprojName}"`);
+        }
+        coreExports.info(`Found csproj file: ${csprojPath}`);
+        // Read and parse the csproj file.
+        const csprojContent = await readCsprojFile(csprojPath);
+        const currentVersion = extractVersion(csprojContent);
+        coreExports.info(`Current version: ${currentVersion}`);
+        coreExports.setOutput('current_version', currentVersion);
+        const versionData = parseVersion(currentVersion);
+        const newVersion = bumpVersion(versionData, bumpType);
+        coreExports.info(`New version: ${newVersion}`);
+        coreExports.setOutput('new_version', newVersion);
+        // Update the csproj file with the new version.
+        const newCsprojContent = updateVersionContent(csprojContent, newVersion);
+        await updateCsprojFile(csprojPath, newCsprojContent);
+        coreExports.info(`csproj file updated with new version.`);
+        // Update Git with the version bump.
+        await updateGit(newVersion, csprojPath, commitUser, commitEmail, commitMessagePrefix);
+        coreExports.info(`Version bump process completed successfully.`);
     }
     catch (error) {
-        // Fail the workflow run if an error occurs
-        if (error instanceof Error)
+        if (error instanceof Error) {
             coreExports.setFailed(error.message);
+        }
+        else {
+            coreExports.setFailed(String(error));
+        }
+        throw error;
     }
 }
 
