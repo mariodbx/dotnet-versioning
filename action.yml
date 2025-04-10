@@ -1,23 +1,43 @@
-name: The name of your action here
-description: Provide a description here
-author: Your name or organization here
+name: Auto Version Bump for .NET Projects
+description:
+  Automatically bumps the version in a .csproj file based on commit messages.
+author: MarioDeBenedictis
 
-# Add your action's branding here. This will appear on the GitHub Marketplace.
 branding:
-  icon: chevron-up
+  icon: tag
   color: purple
 
-# Define your inputs here.
 inputs:
-  milliseconds:
-    description: Your input description here
-    required: true
-    default: '1000'
+  csproj_depth:
+    description: 'Depth for searching for csproj file'
+    required: false
+    default: '1'
+  csproj_name:
+    description: 'Name of the csproj file to search for'
+    required: false
+    default: '*.csproj'
+  commit_user:
+    description: 'The Git commit username'
+    required: false
+    default: 'github-actions'
+  commit_email:
+    description: 'The Git commit email'
+    required: false
+    default: 'github-actions@users.noreply.github.com'
+  commit_message_prefix:
+    description: 'Prefix for the commit message'
+    required: false
+    default: 'chore: bump version to '
 
-# Define your outputs here.
 outputs:
-  time:
-    description: Your output description here
+  current_version:
+    description: 'The current version before the bump.'
+  new_version:
+    description: 'The new version after the bump.'
+  bump_type:
+    description: 'The type of version bump (major, minor, patch).'
+  skip_release:
+    description: 'Indicates if the release should be skipped.'
 
 runs:
   using: node20
